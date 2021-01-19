@@ -110,3 +110,5 @@ CMakeFiles/
 latex/
 html/
 xml/
+
+msvs/*.fdz
