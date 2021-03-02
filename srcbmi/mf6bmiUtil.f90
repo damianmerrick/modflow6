@@ -1,7 +1,8 @@
 !> @brief This module contains helper routines and parameters for the MODFLOW 6 BMI
 !!
 !<
-module mf6bmiUtil  
+module mf6bmiUtil
+  use mf6bmiError
   use iso_c_binding, only: c_int, c_char, c_null_char
   use ConstantsModule, only: MAXCHARLEN, LENMEMPATH, LENVARNAME, &
                              LENMODELNAME, LINELENGTH, LENMEMTYPE, &
@@ -30,28 +31,69 @@ module mf6bmiUtil
   
   integer(c_int), bind(C, name="BMI_LENVARADDRESS") :: BMI_LENVARADDRESS = LENMEMADDRESS + 1 !< max. length for the variable's address C-string
   !DEC$ ATTRIBUTES DLLEXPORT :: BMI_LENVARADDRESS
+  
+  integer(c_int), bind(C, name="BMI_LENCOMPONENTNAME") :: BMI_LENCOMPONENTNAME = 256 !< component name length, i.e. 'MODFLOW 6'
+  !DEC$ ATTRIBUTES DLLEXPORT :: BMI_LENCOMPONENTNAME
 
 contains
    
   !> @brief Split the variable address string
   !!
   !! Splits the full address string into a memory path and variable name,
-  !! following the rules used by the memory manager.
+  !! following the rules used by the memory manager. The error handling
+  !! is inside to avoid lots of duplication
   !<
-  subroutine split_address(c_var_address, mem_path, var_name)
+  subroutine split_address(c_var_address, mem_path, var_name, success)
     use MemoryHelperModule, only: memPathSeparator
     character (kind=c_char), intent(in) :: c_var_address(*) !< full address of a variable
     character(len=LENMEMPATH), intent(out) :: mem_path      !< memory path used by the memory manager
     character(len=LENVARNAME), intent(out) :: var_name      !< name of the variable
+    logical(LGP), intent(out)              :: success       !< false when invalid
     ! local
-    character(len=LENMEMPATH) :: var_address   
+    character(len=LENMEMPATH) :: var_address
+    logical(LGP) :: valid, found
 
-    ! convert to fortran string
-    var_address = char_array_to_string(c_var_address, strlen(c_var_address)) 
+    success = .false.
 
-    call split_mem_address(var_address, mem_path, var_name)
+    ! try and split the address string:
+    var_address = char_array_to_string(c_var_address, strlen(c_var_address))
+    call split_mem_address(var_address, mem_path, var_name, valid)
+    if (.not. valid) then
+      write(bmi_last_error, fmt_invalid_var) trim(var_address)
+      call report_bmi_error(bmi_last_error)
+      return
+    end if
+
+    ! check if the variable even exists:
+    call check_mem_address(mem_path, var_name, found)
+    if (.not. found) then
+      write(bmi_last_error, fmt_unknown_var) trim(var_name), trim(mem_path)
+      call report_bmi_error(bmi_last_error)
+      return
+    end if
+
+    success = .true.
 
   end subroutine split_address
+
+  !> @brief Check if the variable exists in the memory manager
+  !<
+  subroutine check_mem_address(mem_path, var_name, found)
+  use MemoryManagerModule, only: get_from_memorylist
+  use MemoryTypeModule, only: MemoryType
+    character(len=LENMEMPATH), intent(in) :: mem_path      !< memory path used by the memory manager
+    character(len=LENVARNAME), intent(in) :: var_name      !< name of the variable
+    logical(LGP), intent(out)              :: found         !< true when found
+    ! local
+    type(MemoryType), pointer :: mt
+
+    found = .false.
+    mt => null()
+
+    ! check = false: otherwise stop is called when the variable does not exist
+    call get_from_memorylist(var_name, mem_path, mt, found, check=.false.)
+
+  end subroutine check_mem_address
 
   !> @brief Returns the string length without the trailing null character
   !<
@@ -101,17 +143,26 @@ contains
 
   !> @brief Extract the model name from a memory address string
   !<
-  function extract_model_name(var_address) result(model_name)
+  function extract_model_name(var_address, success) result(model_name)
     character(len=*), intent(in) :: var_address !< the memory address for the variable
     character(len=LENMODELNAME) :: model_name   !< the extracted model name
+    logical(LGP), intent(out) :: success
     ! local
     character(len=LENMEMPATH) :: mem_path
     character(len=LENCOMPONENTNAME) :: dummy_component
     character(len=LENVARNAME) :: var_name
-
-    call split_mem_address(var_address, mem_path, var_name)
-    call split_mem_path(mem_path, model_name, dummy_component)
+    logical(LGP) :: split_succeeded
     
+    success = .false.
+
+    call split_mem_address(var_address, mem_path, var_name, split_succeeded)
+    if (.not. split_succeeded) then
+      return
+    end if
+
+    call split_mem_path(mem_path, model_name, dummy_component)
+    success = .true.
+
   end function extract_model_name
 
   !> @brief Get the model name from the grid id
