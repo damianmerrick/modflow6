@@ -8,6 +8,8 @@ module GwfStoModule
   use BaseDisModule,          only: DisBaseType
   use NumericalPackageModule, only: NumericalPackageType
   use BlockParserModule,      only: BlockParserType
+  use InputOutputModule,      only: GetUnit, openfile
+  use TvsModule,              only: TvsType, tvs_cr
 
   implicit none
   public :: GwfStoType, sto_cr
@@ -16,17 +18,22 @@ module GwfStoModule
       ['          STO-SS', '          STO-SY']
 
   type, extends(NumericalPackageType) :: GwfStoType
-    integer(I4B), pointer                            :: isfac => null()          !< indicates if ss is read as storativity
-    integer(I4B), pointer                            :: isseg => null()          !< indicates if ss is 0 below the top of a layer
-    integer(I4B), pointer                            :: iss => null()            !< steady state flag: 1 = steady, 0 = transient
-    integer(I4B), pointer                            :: iusesy => null()         !< flag set if any cell is convertible (0, 1)
-    integer(I4B), dimension(:), pointer, contiguous  :: iconvert => null()       !< confined (0) or convertible (1)
-    real(DP),dimension(:), pointer, contiguous       :: sc1 => null()            !< primary storage capacity (when cell is fully saturated)
-    real(DP),dimension(:), pointer, contiguous       :: sc2 => null()            !< secondary storage capacity (when cell is partially saturated)
-    real(DP), dimension(:), pointer, contiguous      :: strgss => null()         !< vector of specific storage rates
-    real(DP), dimension(:), pointer, contiguous      :: strgsy => null()         !< vector of specific yield rates
-    integer(I4B), dimension(:), pointer, contiguous  :: ibound => null()         !< pointer to model ibound
-    real(DP), pointer                                :: satomega => null()       !< newton-raphson saturation omega
+    integer(I4B), pointer                                :: isfac => null()             !< indicates if ss is read as storativity
+    integer(I4B), pointer                                :: isseg => null()             !< indicates if ss is 0 below the top of a layer
+    integer(I4B), pointer                                :: iss => null()               !< steady state flag: 1 = steady, 0 = transient
+    integer(I4B), pointer                                :: iusesy => null()            !< flag set if any cell is convertible (0, 1)
+    integer(I4B), dimension(:), pointer, contiguous      :: iconvert => null()          !< confined (0) or convertible (1)
+    real(DP), dimension(:), pointer, contiguous          :: sc1 => null()               !< primary storage capacity (when cell is fully saturated)
+    real(DP), dimension(:), pointer, contiguous          :: sc2 => null()               !< secondary storage capacity (when cell is partially saturated)
+    real(DP), dimension(:), pointer, contiguous          :: strgss => null()            !< vector of specific storage rates
+    real(DP), dimension(:), pointer, contiguous          :: strgsy => null()            !< vector of specific yield rates
+    integer(I4B), dimension(:), pointer, contiguous      :: ibound => null()            !< pointer to model ibound
+    real(DP), pointer                                    :: satomega => null()          !< newton-raphson saturation omega
+    integer(I4B), pointer                                :: integratechanges => null()  !< indicates if mid-simulation sc1 and sc2 changes should be integrated via an additional matrix formulation term
+    integer(I4B), pointer                                :: intvs => null()             !< TVS (time-varying storage) unit number (0 if unused)
+    type(TvsType), pointer                               :: tvs => null()               !< TVS object
+    real(DP), dimension(:), pointer, contiguous, private :: oldsc1 => null()            !< previous time step primary storage capacity (when cell is fully saturated)
+    real(DP), dimension(:), pointer, contiguous, private :: oldsc2 => null()            !< previous time step secondary storage capacity (when cell is partially saturated)
   contains
     procedure :: sto_ar
     procedure :: sto_rp
@@ -42,6 +49,7 @@ module GwfStoModule
     procedure, private :: read_options
     procedure, private :: read_data
     procedure, private :: convert_sc1, convert_sc2
+    procedure, private :: save_old_sc1_sc2
   endtype
 
   contains
@@ -123,6 +131,11 @@ module GwfStoModule
     ! -- read the data block
     call this%read_data()
     !
+    ! -- TVS
+    if (this%intvs /= 0) then
+      call this%tvs%ar(this%dis)
+    end if
+    !
     ! -- Return
     return
   end subroutine sto_ar
@@ -159,6 +172,11 @@ module GwfStoModule
     !data aname(3) /'          SPECIFIC YIELD'/
     !data aname(4) /'     STORAGE COEFFICIENT'/
 ! ------------------------------------------------------------------------------
+    !
+    ! -- Store SC1 and SC2 values from end of last stress period if needed
+    if(this%integratechanges /= 0) then
+      call this%save_old_sc1_sc2()
+    end if
     !
     ! -- get stress period data
     if (this%ionper < kper) then
@@ -220,6 +238,11 @@ module GwfStoModule
     write(this%iout,'(//1X,A,I0,A,A,/)') &
       'STRESS PERIOD ', kper, ' IS ', trim(adjustl(css(this%iss)))
     !
+    ! -- TVS
+    if (this%intvs /= 0) then
+      call this%tvs%rp()
+    end if
+    !
     ! -- Return
     return
   end subroutine sto_rp
@@ -231,10 +254,20 @@ module GwfStoModule
 !
 !    SPECIFICATIONS:
 ! ------------------------------------------------------------------------------
+    use TdisModule, only: kstp
+    !
     class(GwfStoType) :: this
 ! ------------------------------------------------------------------------------
     !
-    ! -- Subroutine does not do anything at the moment
+    ! -- Store SC1 and SC2 values from end of last time step if needed
+    if(this%integratechanges /= 0 .and. kstp > 1) then
+      call this%save_old_sc1_sc2()
+    end if
+    !
+    ! -- TVS
+    if(this%intvs /= 0) then
+      call this%tvs%ad()
+    endif
     !
     ! -- Return
     return
@@ -263,7 +296,7 @@ module GwfStoModule
     real(DP),intent(inout),dimension(:) :: rhs
     ! -- local
     integer(I4B) :: n, idiag
-    real(DP) :: tled, rho1, rho2
+    real(DP) :: tled, rho1new, rho1old, rho2new, rho2old
     real(DP) :: tp, bt, tthk
     real(DP) :: snold, snnew
     real(DP) :: ss0, ss1, ssh0, ssh1
@@ -315,16 +348,30 @@ module GwfStoModule
         end if
       end if
       ! -- storage coefficients
-      rho1 = this%sc1(n) * tled
-      rho2 = this%sc2(n) * tled
+      rho1new = this%sc1(n) * tled
+      rho2new = this%sc2(n) * tled
+      !
+      if(this%integratechanges /= 0) then
+        ! -- Integration of storage changes (e.g. when using TVS): separate the old (start of time step) and new (end of time step) storage capacities
+        rho1old = this%oldsc1(n) * tled
+        if(this%iconvert(n) /= 0) then
+          rho2old = this%oldsc2(n) * tled
+        end if
+      else
+        ! -- No integration of storage changes: old and new values are identical => original MF6 storage formulation
+        rho1old = rho1new
+        rho2old = rho2new
+      end if
       ! -- calculate storage coefficients for amat and rhs
       ! -- specific storage
       if (this%iconvert(n) /= 0) then
-        amat(idxglo(idiag)) = amat(idxglo(idiag)) - rho1 * ss1
-        rhs(n) = rhs(n) - rho1 * ss0 * ssh0 + rho1 * ssh1
+        ! -- Storage volume change due to Ss = (cell volume / delt) * (new Ss * new saturated thickness fraction * new head - old Ss * old saturated thickness fraction * old head)
+        amat(idxglo(idiag)) = amat(idxglo(idiag)) - rho1new * ss1
+        rhs(n) = rhs(n) - rho1old * ss0 * ssh0 + rho1new * ssh1
       else
-        amat(idxglo(idiag)) = amat(idxglo(idiag)) - rho1
-        rhs(n) = rhs(n) - rho1 * hold(n)
+        ! -- Storage volume change due to fully confined Ss as above but with both saturated thickness fractions equal to 1
+        amat(idxglo(idiag)) = amat(idxglo(idiag)) - rho1new
+        rhs(n) = rhs(n) - rho1old * hold(n)
       end if
       ! -- specific yield
       if (this%iconvert(n) /= 0) then
@@ -332,15 +379,16 @@ module GwfStoModule
         ! -- add specific yield terms to amat at rhs
         if (snnew < DONE) then
           if (snnew > DZERO) then
-            amat(idxglo(idiag)) = amat(idxglo(idiag)) - rho2
-            rhsterm = rho2 * tthk * snold
-            rhsterm = rhsterm + rho2 * bt
+            ! -- Storage volume change due to Sy = (cell volume / delt) * (new Sy * new saturated thickness fraction - old Sy * old saturated thickness fraction)
+            amat(idxglo(idiag)) = amat(idxglo(idiag)) - rho2new
+            rhsterm = rho2old * tthk * snold
+            rhsterm = rhsterm + rho2new * bt
           else
-            rhsterm = -rho2 * tthk * (DZERO - snold)
+            rhsterm = -tthk * (DZERO - rho2old * snold)
           end if
         ! -- known flow from specific yield
         else
-          rhsterm = -rho2 * tthk * (DONE - snold)
+          rhsterm = -tthk * (rho2new * snnew - rho2old * snold)
         end if
         rhs(n) = rhs(n) - rhsterm
       end if
@@ -369,7 +417,7 @@ module GwfStoModule
     real(DP),intent(inout),dimension(:) :: rhs
     ! -- local
     integer(I4B) :: n, idiag
-    real(DP) :: tled, rho1, rho2
+    real(DP) :: tled, rho1new, rho2new
     real(DP) :: tp, bt, tthk
     real(DP) :: snold, snnew
     real(DP) :: ss0, ss1
@@ -401,15 +449,16 @@ module GwfStoModule
         if (ss1 < DONE) ss1 = DZERO
       end if
       ! -- storage coefficients
-      rho1 = this%sc1(n) * tled
-      rho2 = this%sc2(n) * tled
+      ! -- No need to do anything different here when (this%integratechanges /= 0) and storage capacities have changed, as the derivatives are all with respect to hnew
+      rho1new = this%sc1(n) * tled
+      rho2new = this%sc2(n) * tled
       ! -- calculate storage coefficients for amat and rhs
       ! -- specific storage
       if (this%iconvert(n) /= 0) then
-        rterm = - rho1 * ss1 * hnew(n)
+        rterm = - rho1new * ss1 * hnew(n)
         derv = sQuadraticSaturationDerivative(tp, bt, hnew(n))
         if (this%isseg /= 0) derv = DZERO
-        drterm = -(rho1 * derv * hnew(n))
+        drterm = -(rho1new * derv * hnew(n))
         amat(idxglo(idiag)) = amat(idxglo(idiag)) + drterm
         rhs(n) = rhs(n) + drterm * hnew(n)
       end if
@@ -420,11 +469,11 @@ module GwfStoModule
         if (snnew < DONE) then
           ! -- calculate newton terms for specific yield
           if (snnew > DZERO) then
-            rterm = - rho2 * tthk * snnew
+            rterm = - rho2new * tthk * snnew
             derv = sQuadraticSaturationDerivative(tp, bt, hnew(n))
-            drterm = -rho2 * tthk * derv
-            amat(idxglo(idiag)) = amat(idxglo(idiag)) + drterm + rho2
-            rhs(n) = rhs(n) - rterm + drterm * hnew(n) + rho2 * bt
+            drterm = -rho2new * tthk * derv
+            amat(idxglo(idiag)) = amat(idxglo(idiag)) + drterm + rho2new
+            rhs(n) = rhs(n) - rterm + drterm * hnew(n) + rho2new * bt
           end if
         end if
       end if
@@ -454,7 +503,7 @@ module GwfStoModule
     ! -- local
     integer(I4B) :: n
     real(DP) :: rate
-    real(DP) :: tled, rho1, rho2
+    real(DP) :: tled, rho1new, rho1old, rho2new, rho2old
     real(DP) :: tp, bt, tthk
     real(DP) :: snold, snnew
     real(DP) :: ss0, ss1, ssh0, ssh1
@@ -506,19 +555,31 @@ module GwfStoModule
           end if
         end if
         ! -- storage coefficients
-        rho1 = this%sc1(n) * tled
-        rho2 = this%sc2(n) * tled
+        rho1new = this%sc1(n) * tled
+        rho2new = this%sc2(n) * tled
+        !
+        if(this%integratechanges /= 0) then
+          ! -- Integration of storage changes (e.g. when using TVS): separate the old (start of time step) and new (end of time step) storage capacities
+          rho1old = this%oldsc1(n) * tled
+          if(this%iconvert(n) /= 0) then
+            rho2old = this%oldsc2(n) * tled
+          end if
+        else
+          ! -- No integration of storage changes: old and new values are identical => original MF6 storage formulation
+          rho1old = rho1new
+          rho2old = rho2new
+        end if
         ! -- specific storage
         if (this%iconvert(n) /= 0) then
-          rate = rho1 * ss0 * ssh0 - rho1 * ss1 * hnew(n) - rho1 * ssh1
+          rate = rho1old * ss0 * ssh0 - rho1new * ss1 * hnew(n) - rho1new * ssh1
         else
-          rate = rho1 * hold(n) - rho1 * hnew(n)
+          rate = rho1new * hold(n) - rho1new * hnew(n)
         end if
         this%strgss(n) = rate
         ! -- specific yield
         rate = DZERO
         if (this%iconvert(n) /= 0) then
-          rate = rho2 * tthk * snold  - rho2 * tthk * snnew
+          rate = rho2old * tthk * snold  - rho2new * tthk * snnew
         end if
         this%strgsy(n) = rate
         !
@@ -614,6 +675,12 @@ module GwfStoModule
     class(GwfStoType) :: this
 ! ------------------------------------------------------------------------------
     !
+    ! -- TVS
+    if (this%intvs /= 0) then
+      call this%tvs%da()
+      deallocate(this%tvs)
+    end if
+    !
     ! -- Deallocate arrays if package is active
     if(this%inunit > 0) then
       call mem_deallocate(this%iconvert)
@@ -621,6 +688,14 @@ module GwfStoModule
       call mem_deallocate(this%sc2)
       call mem_deallocate(this%strgss)
       call mem_deallocate(this%strgsy)
+      !
+      ! -- Deallocate lazily-allocated arrays if used
+      if(associated(this%oldsc1)) then
+        deallocate(this%oldsc1)
+      end if
+      if(associated(this%oldsc2)) then
+        deallocate(this%oldsc2)
+      end if
     endif
     !
     ! -- Deallocate scalars
@@ -628,6 +703,8 @@ module GwfStoModule
     call mem_deallocate(this%isseg)
     call mem_deallocate(this%satomega)
     call mem_deallocate(this%iusesy)
+    call mem_deallocate(this%integratechanges)
+    call mem_deallocate(this%intvs)
     !
     ! -- deallocate parent
     call this%NumericalPackageType%da()
@@ -658,12 +735,16 @@ module GwfStoModule
     call mem_allocate(this%isfac, 'ISFAC', this%memoryPath)
     call mem_allocate(this%isseg, 'ISSEG', this%memoryPath)
     call mem_allocate(this%satomega, 'SATOMEGA', this%memoryPath)
+    call mem_allocate(this%integratechanges, 'INTEGRATECHANGES', this%memoryPath)
+    call mem_allocate(this%intvs, 'INTVS', this%memoryPath)
     !
     ! -- Initialize
     this%iusesy = 0
     this%isfac = 0
     this%isseg = 0
     this%satomega = DZERO
+    this%integratechanges = 0
+    this%intvs = 0
     !
     ! -- Return
     return
@@ -784,7 +865,7 @@ module GwfStoModule
     ! -- dummy
     class(GwfStoType) :: this
     ! -- local
-    character(len=LINELENGTH) :: errmsg, keyword
+    character(len=LINELENGTH) :: errmsg, keyword, fname
     integer(I4B) :: ierr
     logical :: isfound, endOfBlock
     ! -- formats
@@ -819,6 +900,24 @@ module GwfStoModule
           case ('STORAGECOEFFICIENT')
             this%isfac = 1
             write(this%iout,fmtstoc)
+          case ('TVS')
+            if (this%intvs /= 0) then
+              errmsg = 'Multiple TVS keywords detected in OPTIONS block. ' // &
+                       'Only one TVS entry allowed.'
+              call store_error(errmsg)
+              cycle
+            end if
+            call this%parser%GetStringCaps(keyword)
+            if(trim(adjustl(keyword)) /= 'FILEIN') then
+              errmsg = 'TVS keyword must be followed by "FILEIN" ' //          &
+                       'then by filename.'
+              call store_error(errmsg)
+              cycle
+            endif
+            call this%parser%GetString(fname)
+            this%intvs = GetUnit()
+            call openfile(this%intvs, this%iout, fname, 'TVS')
+            call tvs_cr(this%tvs, this%name_model, this%intvs, this%iout)
           !
           ! -- right now these are options that are only available in the
           !    development version and are not included in the documentation.
@@ -1032,5 +1131,42 @@ module GwfStoModule
     enddo
     
   end subroutine convert_sc2
+
+  subroutine save_old_sc1_sc2(this)
+! ******************************************************************************
+! save_old_sc1_sc2 -- Save existing sc1 and sc2 values for later use
+! ******************************************************************************
+!
+!    SPECIFICATIONS:
+! ------------------------------------------------------------------------------
+    ! -- dummy
+    class(GwfStoType), target :: this
+    ! -- local
+    integer(I4B) :: n
+! ------------------------------------------------------------------------------
+    !
+    ! -- Lazily allocate arrays
+    if(.not. associated(this%oldsc1)) then
+      allocate(this%oldsc1(this%dis%nodes))
+    end if
+    if(this%iusesy == 1 .and. .not. associated(this%oldsc2)) then
+      allocate(this%oldsc2(this%dis%nodes))
+    end if
+    !
+    ! -- Save current primary storage capacity
+    do n = 1, this%dis%nodes
+      this%oldsc1(n) = this%sc1(n)
+    end do
+    !
+    ! -- Save current secondary storage capacity, if used
+    if(this%iusesy == 1) then
+      do n = 1, this%dis%nodes
+        this%oldsc2(n) = this%sc2(n)
+      end do
+    end if
+    !
+    ! -- Return
+    return
+  end subroutine save_old_sc1_sc2
     
 end module GwfStoModule
