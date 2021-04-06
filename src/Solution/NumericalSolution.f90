@@ -6,7 +6,7 @@ module NumericalSolutionModule
   use ConstantsModule,         only: LINELENGTH, LENSOLUTIONNAME, LENPAKLOC,   &
                                      DPREC, DZERO, DEM20, DEM15, DEM6,         &
                                      DEM4, DEM3, DEM2, DEM1, DHALF,            &
-                                     DONE, DTHREE, DEP6, DEP20, DNODATA,       &
+                                     DONE, DTHREE, DEP3, DEP6, DEP20, DNODATA, &
                                      TABLEFT, TABRIGHT,                        &
                                      MNORMAL, MVALIDATE,                       &
                                      LENMEMPATH
@@ -74,8 +74,9 @@ module NumericalSolutionModule
     real(DP), pointer                                    :: res_in  => NULL()
     integer(I4B), pointer                                :: ibcount => NULL()
     integer(I4B), pointer                                :: icnvg => NULL()
-    integer(I4B), pointer                                :: itertot_timestep => NULL()   !< total nr. of linear solves per call to sln_ca
-    integer(I4B), pointer                                :: itertot_sim => NULL()        !< total nr. of inner iterations for simulation
+    integer(I4B), pointer                                :: itertot_timestep => NULL()     !< total nr. of linear solves per call to sln_ca
+    integer(I4B), pointer                                :: iouttot_timestep => NULL()     !< total nr. of outer iterations per call to sln_ca
+    integer(I4B), pointer                                :: itertot_sim => NULL()          !< total nr. of inner iterations for simulation
     integer(I4B), pointer                                :: mxiter => NULL()
     integer(I4B), pointer                                :: linmeth => NULL()
     integer(I4B), pointer                                :: nonmeth => NULL()
@@ -131,6 +132,7 @@ module NumericalSolutionModule
   contains
     procedure :: sln_df
     procedure :: sln_ar
+    procedure :: sln_calculate_delt
     procedure :: sln_ad
     procedure :: sln_ot
     procedure :: sln_ca
@@ -257,6 +259,7 @@ contains
     call mem_allocate(this%ibcount, 'IBCOUNT', this%memoryPath)
     call mem_allocate(this%icnvg, 'ICNVG', this%memoryPath)
     call mem_allocate(this%itertot_timestep, 'ITERTOT_TIMESTEP', this%memoryPath)
+    call mem_allocate(this%iouttot_timestep, 'IOUTTOT_TIMESTEP', this%memoryPath)
     call mem_allocate(this%itertot_sim, 'INNERTOT_SIM', this%memoryPath)
     call mem_allocate(this%mxiter, 'MXITER', this%memoryPath)
     call mem_allocate(this%linmeth, 'LINMETH', this%memoryPath)
@@ -303,6 +306,7 @@ contains
     this%ibcount = 0
     this%icnvg = 0
     this%itertot_timestep = 0
+    this%iouttot_timestep = 0
     this%itertot_sim = 0
     this%mxiter = 0
     this%linmeth = 1
@@ -998,6 +1002,24 @@ contains
     return
   end subroutine sln_ar
 
+   subroutine sln_calculate_delt(this)
+! ******************************************************************************
+! sln_calculate_delt -- Calculate time step length
+! ******************************************************************************
+!
+!    SPECIFICATIONS:
+! ------------------------------------------------------------------------------
+    ! -- modules
+    ! -- dummy
+    class(NumericalSolutionType) :: this
+    ! -- local
+! ------------------------------------------------------------------------------
+    !
+    ! -- increase or decrease delt based on kiter fraction
+    !
+    return
+  end subroutine sln_calculate_delt
+  
    subroutine sln_ad(this)
 ! ******************************************************************************
 ! sln_ad -- Advance solution
@@ -1023,6 +1045,7 @@ contains
     ! reset convergence flag and inner solve counter
     this%icnvg = 0
     this%itertot_timestep = 0   
+    this%iouttot_timestep = 0   
     
     return
   end subroutine sln_ad
@@ -1154,6 +1177,7 @@ contains
     call mem_deallocate(this%ibcount)
     call mem_deallocate(this%icnvg)
     call mem_deallocate(this%itertot_timestep)
+    call mem_deallocate(this%iouttot_timestep)
     call mem_deallocate(this%itertot_sim)
     call mem_deallocate(this%mxiter)
     call mem_deallocate(this%linmeth)
@@ -1350,7 +1374,7 @@ contains
       call mp%model_ad()
     enddo
     
-    ! advance models and exchanges
+    ! advance solution
     call this%sln_ad()
     
   end subroutine prepareSolve
@@ -1434,7 +1458,7 @@ contains
         end if
         !
         ! -- initialize table and define columns
-        title = 'OUTER ITERATION SUMMARY'
+        title = trim(this%memoryPath) // ' OUTER ITERATION SUMMARY'
         call table_cr(this%outertab, this%name, title)
         call this%outertab%table_df(ntabrows, ntabcols, iout,        &
                                     finalize=.FALSE.)
@@ -1525,9 +1549,11 @@ contains
     CALL this%sln_ls(kiter, kstp, kper, iter, iptc, ptcf)
     call code_timer(1, ttsoln, this%ttsoln)
     !
-    ! -- increment counters storing the total number of linear iterations
-    !    for this timestep and all timesteps
+    ! -- increment counters storing the total number of linear and 
+    !    non-linear iterations for this timestep and the total 
+    !    number of linear iterations for all timesteps
     this%itertot_timestep = this%itertot_timestep + iter
+    this%iouttot_timestep = this%iouttot_timestep + 1
     this%itertot_sim = this%itertot_sim + iter
     !
     ! -- save matrix to a file
@@ -1893,7 +1919,7 @@ contains
       ntabcols = 7
       !
       ! -- initialize table and define columns
-      title = 'INNER ITERATION SUMMARY'
+      title = trim(this%memoryPath) // ' INNER ITERATION SUMMARY'
       call table_cr(this%innertab, this%name, title)
       call this%innertab%table_df(ntabrows, ntabcols, iu)
       tag = 'TOTAL ITERATION'
@@ -2290,10 +2316,14 @@ contains
     ! -- local
     logical :: lsame
     integer(I4B) :: n
-    integer(I4B) :: itestmat, i, i1, i2
+    integer(I4B) :: itestmat
+    integer(I4B) :: i
+    integer(I4B) :: i1
+    integer(I4B) :: i2
     integer(I4B) :: iptct
     integer(I4B) :: iallowptc
-    real(DP) :: adiag, diagval
+    real(DP) :: adiag
+    real(DP) :: diagval
     real(DP) :: l2norm
     real(DP) :: ptcval
     real(DP) :: diagmin
@@ -2305,8 +2335,10 @@ contains
     !
     ! -- take care of loose ends for all nodes before call to solver
     do n = 1, this%neq
+      !
       ! -- store x in temporary location
       this%xtemp(n) = this%x(n)
+      !
       ! -- set dirichlet boundary and no-flow condition
       if (this%active(n) <= 0) then
         this%amat(this%ia(n)) = DONE
@@ -2315,17 +2347,19 @@ contains
         i2 = this%ia(n + 1) - 1
         do i = i1, i2
           this%amat(i) = DZERO
-        enddo
+        end do
+      !
+      ! -- take care of the case where there is a zero on the row diagonal
       else
-        ! -- take care of zero row diagonal
-        diagval = DONE
+        diagval = -DONE
         adiag = abs(this%amat(this%ia(n)))
-        if(adiag.lt.DEM15)then
+        if (adiag < DEM15) then
           this%amat(this%ia(n)) = diagval
-          this%rhs(n) = this%rhs(n) + this%x(n) * diagval
+          this%rhs(n) = this%rhs(n) + diagval * this%x(n) 
         endif
       endif
     end do
+    !
     ! -- pseudo transient continuation
     !
     ! -- set iallowptc
@@ -2340,7 +2374,10 @@ contains
     else
       iallowptc = this%iallowptc
     end if
+    ! -- set iptct
     iptct = iptc * iallowptc
+    ! -- calculate or modify pseudo transient continuation terms and add
+    !    to amat diagonals
     if (iptct /= 0) then
       call this%sln_l2norm(this%neq, this%nja,                                 &
                            this%ia, this%ja, this%active,                      &
@@ -2402,7 +2439,7 @@ contains
       diagmin = DEP20
       bnorm = DZERO
       do n = 1, this%neq
-        if (this%active(n).gt.0) then
+        if (this%active(n) > 0) then
           diagval = abs(this%amat(this%ia(n)))
           bnorm = bnorm + this%rhs(n) * this%rhs(n)
           if (diagval < diagmin) diagmin = diagval
@@ -2418,26 +2455,26 @@ contains
       end if
       this%l2norm0 = l2norm
     end if
-  !
-  ! -- save rhs, amat to a file
-  !    to enable set itestmat to 1 and recompile
-  !-------------------------------------------------------
-      itestmat = 0
-      if (itestmat == 1) then
-        write(fname, fmtfname) this%id, kper, kstp, kiter
-        print *, 'Saving amat to: ', trim(adjustl(fname))
-        open(99,file=trim(adjustl(fname)))
-        WRITE(99,*)'NODE, RHS, AMAT FOLLOW'
-        DO N = 1, this%NEQ
-          I1 = this%IA(N)
-          I2 = this%IA(N+1)-1
-          WRITE(99,'(*(G0,:,","))') N, this%RHS(N), (this%ja(i),i=i1,i2), &
-                        (this%AMAT(I),I=I1,I2)
-        END DO
-        close(99)
-        !stop
-      end if
-  !-------------------------------------------------------
+    !
+    ! -- save rhs, amat to a file
+    !    to enable set itestmat to 1 and recompile
+    !-------------------------------------------------------
+    itestmat = 0
+    if (itestmat == 1) then
+      write(fname, fmtfname) this%id, kper, kstp, kiter
+      print *, 'Saving amat to: ', trim(adjustl(fname))
+      open(99,file=trim(adjustl(fname)))
+      WRITE(99,*)'NODE, RHS, AMAT FOLLOW'
+      DO N = 1, this%NEQ
+        I1 = this%IA(N)
+        I2 = this%IA(N+1)-1
+        WRITE(99,'(*(G0,:,","))') N, this%RHS(N), (this%ja(i),i=i1,i2), &
+                      (this%AMAT(I),I=I1,I2)
+      END DO
+      close(99)
+      !stop
+    end if
+    !-------------------------------------------------------
     !
     ! call appropriate linear solver
     ! call ims linear solver

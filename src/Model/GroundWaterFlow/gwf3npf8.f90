@@ -101,10 +101,10 @@ module GwfNpfModule
     procedure                               :: npf_cf
     procedure                               :: npf_fc
     procedure                               :: npf_fn
-    procedure                               :: npf_flowja
-    procedure                               :: npf_bdadj
+    procedure                               :: npf_cq
+    procedure                               :: npf_save_model_flows
     procedure                               :: npf_nur
-    procedure                               :: npf_ot
+    procedure                               :: npf_print_model_flows
     procedure                               :: npf_da
     procedure, private                      :: thksat     => sgwf_npf_thksat
     procedure, private                      :: qcalc      => sgwf_npf_qcalc
@@ -813,9 +813,9 @@ module GwfNpfModule
     return
   end subroutine npf_nur
 
-  subroutine npf_flowja(this, hnew, flowja)
+  subroutine npf_cq(this, hnew, flowja)
 ! ******************************************************************************
-! npf_flowja -- Calculate flowja
+! npf_cq -- Calculate flowja
 ! ******************************************************************************
 !
 !    SPECIFICATIONS:
@@ -849,7 +849,7 @@ module GwfNpfModule
     !
     ! -- Return
     return
-  end subroutine npf_flowja
+  end subroutine npf_cq
 
   subroutine sgwf_npf_thksat(this, n, hn, thksat)
 ! ******************************************************************************
@@ -963,9 +963,9 @@ module GwfNpfModule
     return
   end subroutine sgwf_npf_qcalc
 
-  subroutine npf_bdadj(this, flowja, icbcfl, icbcun)
+  subroutine npf_save_model_flows(this, flowja, icbcfl, icbcun)
 ! ******************************************************************************
-! npf_bdadj -- Record flowja and calculate specific discharge if requested
+! npf_save_model_flows -- Record flowja and calculate specific discharge if requested
 ! ******************************************************************************
 !
 !    SPECIFICATIONS:
@@ -998,7 +998,6 @@ module GwfNpfModule
     !
     ! -- Calculate specific discharge at cell centers and write, if requested
     if (this%icalcspdis /= 0) then
-      call this%calc_spdis(flowja)
       if(ibinun /= 0) call this%sav_spdis(ibinun)
     endif
     !
@@ -1009,9 +1008,9 @@ module GwfNpfModule
     !
     ! -- Return
     return
-  end subroutine npf_bdadj
+  end subroutine npf_save_model_flows
 
-  subroutine npf_ot(this, flowja)
+  subroutine npf_print_model_flows(this, ibudfl, flowja)
 ! ******************************************************************************
 ! npf_ot -- Budget
 ! ******************************************************************************
@@ -1023,6 +1022,7 @@ module GwfNpfModule
     use ConstantsModule, only: LENBIGLINE
     ! -- dummy
     class(GwfNpfType) :: this
+    integer(I4B), intent(in) :: ibudfl
     real(DP),intent(inout),dimension(:) :: flowja
     ! -- local
     character(len=LENBIGLINE) :: line
@@ -1035,7 +1035,7 @@ module GwfNpfModule
 ! ------------------------------------------------------------------------------
     !
     ! -- Write flowja to list file if requested
-    if (this%iprflow > 0) then
+    if (ibudfl /= 0 .and. this%iprflow > 0) then
       write(this%iout, fmtiprflow) kper, kstp
       do n = 1, this%dis%nodes
         line = ''
@@ -1055,7 +1055,7 @@ module GwfNpfModule
     !
     ! -- Return
     return
-  end subroutine npf_ot
+  end subroutine npf_print_model_flows
 
   subroutine npf_da(this)
 ! ******************************************************************************

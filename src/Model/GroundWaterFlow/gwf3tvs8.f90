@@ -19,8 +19,8 @@ module TvsModule
     integer(I4B), pointer :: isfac => null()                      ! STO flag indicating if ss is read as storativity
     integer(I4B), pointer :: integratechanges => null()           ! STO flag indicating if ss is read as storativity
     integer(I4B), pointer :: iusesy => null()                     ! STO flag set if any cell is convertible (0, 1)
-    real(DP), dimension(:), pointer, contiguous :: sc1 => null()  ! STO primary storage capacity (when cell is fully saturated)
-    real(DP), dimension(:), pointer, contiguous :: sc2 => null()  ! STO secondary storage capacity (when cell is partially saturated)
+    real(DP), dimension(:), pointer, contiguous :: ss => null()  ! STO primary storage capacity (when cell is fully saturated)
+    real(DP), dimension(:), pointer, contiguous :: sy => null()  ! STO secondary storage capacity (when cell is partially saturated)
   contains
     procedure :: da => tvs_da
     procedure :: ar_set_pointers => tvs_ar_set_pointers
@@ -64,7 +64,7 @@ contains
     character(len=LENMEMPATH) :: stoMemoryPath
     !
     character(len=*), parameter :: fmttvs =                                    &
-      "(1x,/1x,'TVS -- TIME-VARYING S PACKAGE, VERSION 1, 03/02/2021',         &
+      "(1x,/1x,'TVS -- TIME-VARYING S PACKAGE, VERSION 1, 04/06/2021',         &
      &' INPUT READ FROM UNIT ', i0, //)"
 ! ------------------------------------------------------------------------------
     !
@@ -77,8 +77,8 @@ contains
     call mem_setptr(this%isfac, 'ISFAC', stoMemoryPath)
     call mem_setptr(this%integratechanges, 'INTEGRATECHANGES', stoMemoryPath)
     call mem_setptr(this%iusesy, 'IUSESY', stoMemoryPath)
-    call mem_setptr(this%sc1, 'SC1', stoMemoryPath)
-    call mem_setptr(this%sc2, 'SC2', stoMemoryPath)
+    call mem_setptr(this%ss, 'SS', stoMemoryPath)
+    call mem_setptr(this%sy, 'SY', stoMemoryPath)
     !
     ! -- Instruct STO to integrate storage changes by default, since TVS is active
     this%integratechanges = 1
@@ -132,9 +132,9 @@ contains
     !
     select case (varName)
       case ('SS')
-        bndElem => this%sc1(n)
+        bndElem => this%ss(n)
       case ('SY')
-        bndElem => this%sc2(n)
+        bndElem => this%sy(n)
       case default
         bndElem => null()
     end select
@@ -154,7 +154,7 @@ contains
     integer(I4B), intent(in) :: kstp
 ! ------------------------------------------------------------------------------
     !
-    ! -- No need to record TVS/STO changes, as no other packages cache SC1 or SC2 values
+    ! -- No need to record TVS/STO changes, as no other packages cache ss or sy values
     !
     return
   end subroutine tvs_set_changed_at
@@ -169,7 +169,7 @@ contains
     class(TvsType) :: this
 ! ------------------------------------------------------------------------------
     !
-    ! -- No need to record TVS/STO changes, as no other packages cache SC1 or SC2 values
+    ! -- No need to record TVS/STO changes, as no other packages cache ss or sy values
     !
     return
   end subroutine tvs_reset_change_flags
@@ -197,33 +197,20 @@ contains
     !
     ! -- Check the changed value is ok and convert to storage capacity
     if(varName == 'SS') then
-      if(this%sc1(n) < DZERO) then
+      if(this%ss(n) < DZERO) then
         call this%dis%noder_to_string(n, cellstr)
-        write(errmsg, fmtserr) trim(adjustl(this%packName)), 'SS', trim(cellstr), this%sc1(n)
+        write(errmsg, fmtserr) trim(adjustl(this%packName)), 'SS', trim(cellstr), this%ss(n)
         call store_error(errmsg)
-      else
-        !
-        ! -- Multiply by cell volume (if using specific storage) or area (if using storativity) to get primary storage capacity
-        if(this%isfac == 0) then
-          thick = this%dis%top(n) - this%dis%bot(n)
-          this%sc1(n) = this%sc1(n) * thick * this%dis%area(n)
-        else
-          this%sc1(n) = this%sc1(n) * this%dis%area(n)
-        endif
       endif
     elseif(varName == 'SY') then
       if(this%iusesy /= 1) then
         call this%dis%noder_to_string(n, cellstr)
         write(errmsg, fmtsyerr) trim(adjustl(this%packName)), 'SY', trim(cellstr)
         call store_error(errmsg)
-      elseif(this%sc2(n) < DZERO) then
+      elseif(this%sy(n) < DZERO) then
         call this%dis%noder_to_string(n, cellstr)
-        write(errmsg, fmtserr) trim(adjustl(this%packName)), 'SY', trim(cellstr), this%sc2(n)
+        write(errmsg, fmtserr) trim(adjustl(this%packName)), 'SY', trim(cellstr), this%sy(n)
         call store_error(errmsg)
-      else
-        !
-        ! -- Multiply by cell area to get secondary storage capacity
-        this%sc2(n) = this%sc2(n) * this%dis%area(n)
       endif
     end if
     !
@@ -244,8 +231,8 @@ contains
     nullify(this%isfac)
     nullify(this%integratechanges)
     nullify(this%iusesy)
-    nullify(this%sc1)
-    nullify(this%sc2)
+    nullify(this%ss)
+    nullify(this%sy)
     !
     ! -- Deallocate parent
     call tvbase_da(this)

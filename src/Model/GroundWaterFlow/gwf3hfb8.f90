@@ -44,7 +44,7 @@ module GwfHfbModule
     procedure :: hfb_rp
     procedure :: hfb_ad
     procedure :: hfb_fc
-    procedure :: hfb_flowja
+    procedure :: hfb_cq
     procedure :: hfb_da
     procedure          :: allocate_scalars
     procedure, private :: allocate_arrays
@@ -376,9 +376,9 @@ module GwfHfbModule
     return
   end subroutine hfb_fc
 
-  subroutine hfb_flowja(this, hnew, flowja)
+  subroutine hfb_cq(this, hnew, flowja)
 ! ******************************************************************************
-! hfb_flowja -- flowja will automatically include the effects of the hfb
+! hfb_cq -- flowja will automatically include the effects of the hfb
 !   for confined and newton cases when xt3d is not used.  This method
 !   recalculates flowja for the other cases.
 ! ******************************************************************************
@@ -471,7 +471,7 @@ module GwfHfbModule
     !
     ! -- return
     return
-  end subroutine hfb_flowja
+  end subroutine hfb_cq
 
   subroutine hfb_da(this)
 ! ******************************************************************************

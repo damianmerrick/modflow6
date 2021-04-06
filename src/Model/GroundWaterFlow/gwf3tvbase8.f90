@@ -244,7 +244,7 @@ contains
     character(len=*),parameter :: fmtblkerr =                                   &
       "('Looking for BEGIN PERIOD iper.  Found ', a, ' instead.')"
     character(len=*),parameter :: fmtvalchg =                                   &
-      "(a, ' package: Setting ', a, ' value for cell ', a, ' at stress period ', i0, ' = ', g12.5)"
+      "(a, ' package: Setting ', a, ' value for cell ', a, ' at start of stress period ', i0, ' = ', g12.5)"
 ! ------------------------------------------------------------------------------
     !
     if(this%inunit == 0) return

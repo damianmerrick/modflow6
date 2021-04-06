@@ -67,7 +67,7 @@ contains
     character(len=LENMEMPATH) :: npfMemoryPath
     !
     character(len=*), parameter :: fmttvk =                                    &
-      "(1x,/1x,'TVK -- TIME-VARYING K PACKAGE, VERSION 1, 03/02/2021',         &
+      "(1x,/1x,'TVK -- TIME-VARYING K PACKAGE, VERSION 1, 04/06/2021',         &
      &' INPUT READ FROM UNIT ', i0, //)"
 ! ------------------------------------------------------------------------------
     !
